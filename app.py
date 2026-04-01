@@ -1,26 +1,20 @@
 #!/usr/bin/env python3
 """Mac Voice — Local dictation tool with floating status window."""
 
+import atexit
 import os
 import queue
+import signal
 import threading
 import time as _time
 import sys
-import signal
 
 import AppKit
-import Quartz
 import objc
-from objc import super
 from PyObjCTools import AppHelper
 from pynput import keyboard
 
-from config import (
-    APP_NAME,
-    DEFAULT_LANGUAGE,
-    MAX_HISTORY,
-    SUPPORTED_LANGUAGES,
-)
+from config import DEFAULT_LANGUAGE, MAX_HISTORY
 from recorder import Recorder
 from transcriber import Transcriber
 from clipboard import paste_text
@@ -62,7 +56,7 @@ def kill_old_process():
                 cmd = result.stdout.strip()
                 if "app.py" in cmd and "mac-voice" in cmd:
                     os.kill(old_pid, signal.SIGTERM)
-                    sys.stderr.write(f"Killed old Mac Voice process (PID {old_pid})\n")
+                    sys.stderr.write(f"[mac-voice] killed old process (PID {old_pid})\n")
         except (ValueError, ProcessLookupError, PermissionError):
             pass
         try:
@@ -117,16 +111,7 @@ class AppDelegate(AppKit.NSObject):
 
     def _create_window(self):
         # Initial position — will be repositioned near cursor on first hotkey
-        mouse_loc = AppKit.NSEvent.mouseLocation()
-        target_screen = AppKit.NSScreen.mainScreen()
-        for screen in AppKit.NSScreen.screens():
-            if AppKit.NSPointInRect(mouse_loc, screen.frame()):
-                target_screen = screen
-                break
-        vf = target_screen.visibleFrame()
-        x = vf.origin.x + vf.size.width - WINDOW_WIDTH - MARGIN
-        y = vf.origin.y + vf.size.height - STATUS_HEIGHT - MARGIN
-
+        x, y = self._get_cursor_screen_position()
         rect = AppKit.NSMakeRect(x, y, WINDOW_WIDTH, STATUS_HEIGHT)
 
         self.panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -228,20 +213,23 @@ class AppDelegate(AppKit.NSObject):
     # ── Position near cursor ─────────────────────────────────────────
 
     @objc.python_method
-    def _position_near_cursor(self):
-        """Position window in top-right corner of the screen where the mouse cursor is."""
+    def _get_cursor_screen_position(self):
+        """Return (x, y) for top-right corner of the screen where the mouse cursor is."""
         mouse_loc = AppKit.NSEvent.mouseLocation()
-        # Find which screen the cursor is on
         target_screen = AppKit.NSScreen.mainScreen()
         for screen in AppKit.NSScreen.screens():
             if AppKit.NSPointInRect(mouse_loc, screen.frame()):
                 target_screen = screen
                 break
-
-        sf = target_screen.frame()
-        vf = target_screen.visibleFrame()  # excludes menubar/dock
+        vf = target_screen.visibleFrame()
         x = vf.origin.x + vf.size.width - WINDOW_WIDTH - MARGIN
         y = vf.origin.y + vf.size.height - STATUS_HEIGHT - MARGIN
+        return x, y
+
+    @objc.python_method
+    def _position_near_cursor(self):
+        """Position window in top-right corner of the screen where the mouse cursor is."""
+        x, y = self._get_cursor_screen_position()
         self.panel.setFrameOrigin_(AppKit.NSMakePoint(x, y))
 
     # ── Recording timer ──────────────────────────────────────────────
@@ -398,10 +386,10 @@ class AppDelegate(AppKit.NSObject):
                     has_cmd = bool(flags & CMD_FLAG)
                     has_shift = bool(flags & SHIFT_FLAG)
                     if has_cmd and has_shift:
-                        sys.stderr.write(f"[hotkey] ⌘⇧1 pressed, state={self.state}\n")
+                        sys.stderr.write(f"[mac-voice] hotkey pressed, state={self.state}\n")
                         self.action_queue.put(("toggle",))
             except Exception as e:
-                sys.stderr.write(f"[hotkey error] {e}\n")
+                sys.stderr.write(f"[mac-voice] hotkey error: {e}\n")
 
         listener = keyboard.Listener(on_press=on_press)
         listener.daemon = True
@@ -414,36 +402,35 @@ class AppDelegate(AppKit.NSObject):
     def _load_model(self):
         try:
             self.transcriber.load_model()
-            self.model_ready = True
-            self.action_queue.put(("set_state", "idle"))
-        except FileNotFoundError as e:
+            self.action_queue.put(("model_loaded",))
+        except Exception as e:
             self.action_queue.put(("flash", f"Error: {e}"))
 
     # ── Recording ────────────────────────────────────────────────────
 
     @objc.python_method
     def _toggle_recording(self):
-        sys.stderr.write(f"[toggle] state={self.state}, model_ready={self.model_ready}\n")
+        sys.stderr.write(f"[mac-voice] toggle: state={self.state}\n")
 
         if not self.panel.isVisible():
             self._position_near_cursor()
             self.panel.orderFrontRegardless()
 
-        if self.state == "idle":
+        if self.state in ("idle", "done"):
             if not self.model_ready:
-                sys.stderr.write("[toggle] model not ready, ignoring\n")
+                sys.stderr.write("[mac-voice] model not ready, ignoring toggle\n")
                 return
             self._position_near_cursor()
             self._set_state("recording")
             self._start_record_timer()
             self.recorder.start()
-            sys.stderr.write("[toggle] recording started\n")
+            sys.stderr.write("[mac-voice] recording started\n")
 
         elif self.state == "recording":
             self._stop_record_timer()
             self._set_state("transcribing")
             audio = self.recorder.stop()
-            sys.stderr.write(f"[toggle] recording stopped, audio length={len(audio)}\n")
+            sys.stderr.write(f"[mac-voice] recording stopped, {len(audio)} samples\n")
             threading.Thread(
                 target=self._do_transcribe, args=(audio,), daemon=True
             ).start()
@@ -455,9 +442,12 @@ class AppDelegate(AppKit.NSObject):
             if text:
                 self.action_queue.put(("paste", text))
                 self.action_queue.put(("add_history", text))
+            self.action_queue.put(("done_then_idle",))
         except Exception as e:
             self.action_queue.put(("flash", f"Error: {e}"))
-        self.action_queue.put(("done_then_idle",))
+            threading.Timer(
+                3.0, lambda: self.action_queue.put(("set_state", "idle"))
+            ).start()
 
     # ── Queue (main thread) ──────────────────────────────────────────
 
@@ -474,10 +464,16 @@ class AppDelegate(AppKit.NSObject):
                 self._toggle_recording()
             elif cmd == "set_state":
                 self._set_state(action[1])
+            elif cmd == "model_loaded":
+                self.model_ready = True
+                self._set_state("idle")
             elif cmd == "restore_state":
-                self._set_state(self.state)
+                if self.state == "idle":
+                    self._set_state("idle")
             elif cmd == "paste":
-                paste_text(action[1])
+                threading.Thread(
+                    target=paste_text, args=(action[1],), daemon=True
+                ).start()
             elif cmd == "add_history":
                 self.history.insert(0, action[1])
                 self.history = self.history[:MAX_HISTORY]
@@ -494,7 +490,6 @@ class AppDelegate(AppKit.NSObject):
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     kill_old_process()
-    import atexit
     atexit.register(cleanup_pid)
 
     app = AppKit.NSApplication.sharedApplication()
@@ -504,16 +499,15 @@ def main():
     app.setDelegate_(delegate)
 
     # Handle Ctrl+C gracefully
-    import signal
     def sigint_handler(sig, frame):
-        sys.stderr.write("\nQuitting Mac Voice...\n")
+        sys.stderr.write("\n[mac-voice] quitting...\n")
         cleanup_pid()
         AppHelper.stopEventLoop()
         sys.exit(0)
     signal.signal(signal.SIGINT, sigint_handler)
     signal.signal(signal.SIGTERM, sigint_handler)
 
-    sys.stderr.write("Mac Voice started. Press ⌘⇧1 to record. Ctrl+C to quit.\n")
+    sys.stderr.write("[mac-voice] started. Press Cmd+Shift+1 to record. Ctrl+C to quit.\n")
     AppHelper.runEventLoop(installInterrupt=True)
 
 
