@@ -20,5 +20,4 @@ SUPPORTED_LANGUAGES = {
 MAX_HISTORY = 10
 
 # UI
-ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 APP_NAME = "Mac Voice"

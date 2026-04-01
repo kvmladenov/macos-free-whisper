@@ -35,11 +35,7 @@ echo "[2/4] Installing dependencies..."
 venv/bin/pip install -q -r requirements.txt
 echo "  ✓ Dependencies installed"
 
-echo "[3/4] Generating icons..."
-venv/bin/python generate_icons.py
-echo "  ✓ Icons generated"
-
-echo "[4/4] Downloading Whisper large-v3 model..."
+echo "[3/3] Downloading Whisper large-v3 model..."
 MODEL_DIR="$SCRIPT_DIR/models"
 MODEL_FILE="$MODEL_DIR/ggml-large-v3.bin"
 
