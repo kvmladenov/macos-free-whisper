@@ -1,0 +1,7 @@
+venv/
+models/
+__pycache__/
+*.pyc
+.macvoice.pid
+.DS_Store
+SESSION.md
