@@ -5,3 +5,4 @@ __pycache__/
 .macvoice.pid
 .DS_Store
 SESSION.md
+.env

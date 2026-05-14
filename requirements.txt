@@ -4,3 +4,4 @@ numpy>=1.24.0
 pywhispercpp>=1.2.0
 pyobjc-framework-Cocoa>=10.0
 pyobjc-framework-Quartz>=10.0
+requests>=2.31.0

@@ -16,7 +16,7 @@ from pynput import keyboard
 
 from config import DEFAULT_LANGUAGE, MAX_HISTORY
 from recorder import Recorder
-from transcriber import Transcriber
+from transcriber import create_transcriber
 from clipboard import paste_text
 
 # ── Layout constants ─────────────────────────────────────────────────
@@ -87,7 +87,7 @@ class AppDelegate(AppKit.NSObject):
         self.language = DEFAULT_LANGUAGE
         self.history = []
         self.recorder = Recorder()
-        self.transcriber = Transcriber()
+        self.transcriber = create_transcriber()
         self.model_ready = False
         self.action_queue = queue.Queue()
         self.expanded = False
@@ -404,7 +404,9 @@ class AppDelegate(AppKit.NSObject):
             self.transcriber.load_model()
             self.action_queue.put(("model_loaded",))
         except Exception as e:
+            sys.stderr.write(f"[mac-voice] load_model failed: {e}\n")
             self.action_queue.put(("flash", f"Error: {e}"))
+            self.action_queue.put(("set_state", "idle"))
 
     # ── Recording ────────────────────────────────────────────────────
 
